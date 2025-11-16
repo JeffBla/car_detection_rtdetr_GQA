@@ -71,6 +71,53 @@ def evaluate(detector, data_loader, device):
 
     return metric.compute()
 
+
+def parse_args():
+    """Parse CLI options for training/evaluation."""
+    parser = argparse.ArgumentParser(
+        description="RT-DETR training script for GTA car detection.")
+    parser.add_argument("--root-dir",
+                        type=str,
+                        default="./hw3_dataset",
+                        help="Path to dataset root directory.")
+    parser.add_argument("--batch-size",
+                        type=int,
+                        default=2,
+                        help="Batch size for training and validation loader.")
+    parser.add_argument("--lr",
+                        type=float,
+                        default=1e-4,
+                        help="Learning rate for AdamW.")
+    parser.add_argument("--weight-decay",
+                        type=float,
+                        default=1e-4,
+                        help="Weight decay for AdamW.")
+    parser.add_argument("--num-epochs",
+                        type=int,
+                        default=10,
+                        help="Number of training epochs.")
+    parser.add_argument("--eval-interval",
+                        type=int,
+                        default=1,
+                        help="How often (in epochs) to run validation.")
+    parser.add_argument("--checkpoint-path",
+                        type=str,
+                        default="ckpt_epoch_best{epoch}.pth",
+                        help="Pattern for checkpoint path. Empty to disable.")
+    parser.add_argument("--num-kv-heads",
+                        type=int,
+                        default=4,
+                        help="KV head count for GroupedQueryAttention.")
+    parser.add_argument("--device",
+                        type=str,
+                        default="cuda" if torch.cuda.is_available() else "cpu",
+                        help="Device identifier, e.g. cuda or cpu.")
+    parser.add_argument("--skip-train",
+                        action="store_true",
+                        help="Skip running training loop (e.g. dry run).")
+    return parser.parse_args()
+
+
 def train(detector, config):
     device = config["device"]
     detector = detector.to(device)
@@ -147,7 +194,9 @@ def train(detector, config):
 
 
 if __name__ == "__main__":
-    config = None
+    args = parse_args()
+    config = vars(args)
+
     model = RTDetrGQAForObjectDetection(config)
 
     if config["train"]:
