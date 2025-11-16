@@ -1,13 +1,4 @@
 hw3_dataset*
 AGENTS.md
 
-let's discuss. no coding.
-what's the best way to implement the eval in training
-if (epoch + 1) % config["eval_interval"] == 0:
-            detector.eval()
-
-            # 在這裡可以加入 validation code，計算 mAP
-            # 省略...
-            # 這裡可以存 checkpoint，然後用助教提供的 eval code
-            # (IoU threshold = 0.85) 去算 validation mAP
-            # torch.save(model.state_dict(), f"ckpt_epoch{epoch+1}.pth")
+__pycache__
