@@ -1,7 +1,11 @@
 import argparse
+import json
 import torch
+from tqdm import tqdm
+from functools import partial
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import LambdaLR
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
 
 from ds import GTACarDataset, collate_fn
@@ -49,7 +53,7 @@ def evaluate(detector, data_loader, device):
                                   class_metrics=True)
     detector.eval()
 
-    for batch in data_loader:
+    for batch in tqdm(data_loader):
         pixel_values = batch["pixel_values"].to(device)
         pixel_mask = batch["pixel_mask"].to(device)
 
@@ -76,11 +80,11 @@ def parse_args():
     """Parse CLI options for training/evaluation."""
     parser = argparse.ArgumentParser(
         description="RT-DETR training script for GTA car detection.")
-    parser.add_argument("--root-dir",
+    parser.add_argument("--root_dir",
                         type=str,
                         default="./hw3_dataset",
                         help="Path to dataset root directory.")
-    parser.add_argument("--batch-size",
+    parser.add_argument("--batch_size",
                         type=int,
                         default=2,
                         help="Batch size for training and validation loader.")
@@ -88,23 +92,23 @@ def parse_args():
                         type=float,
                         default=1e-4,
                         help="Learning rate for AdamW.")
-    parser.add_argument("--weight-decay",
+    parser.add_argument("--weight_decay",
                         type=float,
                         default=1e-4,
                         help="Weight decay for AdamW.")
-    parser.add_argument("--num-epochs",
+    parser.add_argument("--num_epochs",
                         type=int,
                         default=10,
                         help="Number of training epochs.")
-    parser.add_argument("--eval-interval",
+    parser.add_argument("--eval_interval",
                         type=int,
                         default=1,
                         help="How often (in epochs) to run validation.")
-    parser.add_argument("--checkpoint-path",
+    parser.add_argument("--checkpoint_path",
                         type=str,
-                        default="ckpt_epoch_best{epoch}.pth",
+                        default="./run/ckpt_epoch_best{epoch}.pth",
                         help="Pattern for checkpoint path. Empty to disable.")
-    parser.add_argument("--num-kv-heads",
+    parser.add_argument("--num_kv_heads",
                         type=int,
                         default=4,
                         help="KV head count for GroupedQueryAttention.")
@@ -112,9 +116,19 @@ def parse_args():
                         type=str,
                         default="cuda" if torch.cuda.is_available() else "cpu",
                         help="Device identifier, e.g. cuda or cpu.")
-    parser.add_argument("--skip-train",
+    parser.add_argument("--skip_train",
                         action="store_true",
                         help="Skip running training loop (e.g. dry run).")
+    parser.add_argument(
+        "--warmup_steps",
+        type=int,
+        default=0,
+        help="Number of optimizer steps to linearly warm up LR.")
+    parser.add_argument(
+        "--warmup_epochs",
+        type=int,
+        default=2,
+        help="Alternative warmup duration expressed in epochs.")
     return parser.parse_args()
 
 
@@ -130,27 +144,44 @@ def train(detector, config):
         train_dataset,
         batch_size=config["batch_size"],
         shuffle=True,
-        collate_fn=collate_fn,
+        collate_fn=partial(collate_fn, processor=detector.processor),
     )
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=config["batch_size"],
         shuffle=False,
-        collate_fn=collate_fn,
+        collate_fn=partial(collate_fn, processor=detector.processor),
     )
 
     optimizer = AdamW(detector.parameters(),
                       lr=config["lr"],
                       weight_decay=config["weight_decay"])
     num_epochs = config["num_epochs"]
+    steps_per_epoch = len(train_loader)
+    total_updates = steps_per_epoch * num_epochs
+    warmup_steps = max(
+        int(config.get("warmup_steps", 0)),
+        int(config.get("warmup_epochs", 0) * steps_per_epoch),
+    )
+    scheduler = None
+    if warmup_steps > 0 and total_updates > 0:
+        warmup_steps = min(warmup_steps, total_updates)
+
+        def lr_lambda(step: int) -> float:
+            if step < warmup_steps:
+                return float(step + 1) / float(max(1, warmup_steps))
+            return 1.0
+
+        scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
 
     best_score = 0.0
-    for epoch in range(num_epochs):
+    global_step = 0
+    for epoch in tqdm(range(num_epochs)):
         detector.train()
         total_loss = 0.0
 
-        for batch in train_loader:
+        for batch in tqdm(train_loader):
             pixel_values = batch["pixel_values"].to(device)
             pixel_mask = batch["pixel_mask"].to(device)
             labels = [{
@@ -168,8 +199,11 @@ def train(detector, config):
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
 
             total_loss += loss.item()
+            global_step += 1
 
         print(
             f"Epoch {epoch+1}: train loss = {total_loss / len(train_loader):.4f}"
@@ -199,5 +233,5 @@ if __name__ == "__main__":
 
     model = RTDetrGQAForObjectDetection(config)
 
-    if config["train"]:
+    if not config["skip_train"]:
         train(model, config)
