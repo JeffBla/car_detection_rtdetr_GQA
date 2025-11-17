@@ -52,7 +52,8 @@ class GTACarDataset(Dataset):
             "annotations": [
                 {
                     "bbox": ann["bbox"],  # [x_min, y_min, w, h]
-                    "category_id": ann["category_id"]  # 車 = 0
+                    "category_id": ann["category_id"],  # 車 = 0
+                    "area": ann["area"],
                 } for ann in anns
             ],
         }
@@ -68,23 +69,27 @@ class GTACarDataset(Dataset):
         # pixel_mask:   (1, H, W)
         # labels:       tuple(len=1)[ dict(boxes, class_labels, area, ...) ]
         pixel_values = encoded["pixel_values"].squeeze(0)
-        pixel_mask = encoded["pixel_mask"].squeeze(0)
         labels = encoded["labels"][0]
 
         return {
             "pixel_values": pixel_values,
-            "pixel_mask": pixel_mask,
             "labels": labels,
         }
 
 
-def collate_fn(batch):
-    pixel_values = torch.stack([item["pixel_values"] for item in batch])
-    pixel_mask = torch.stack([item["pixel_mask"] for item in batch])
-    labels = [item["labels"] for item in batch]  # list of dicts，長度隨 batch_size
+def collate_fn(batch, processor):
+    pixel_values = [item["pixel_values"] for item in batch]
+    labels = [item["labels"] for item in batch]
+
+    # 這裡會做 padding + 建 pixel_mask
+    encoding = processor.pad(
+        images=pixel_values,
+        return_tensors="pt",
+        return_pixel_mask=True,
+    )
 
     return {
-        "pixel_values": pixel_values,
-        "pixel_mask": pixel_mask,
+        "pixel_values": encoding["pixel_values"],  # (B, 3, H, W)
+        "pixel_mask": encoding["pixel_mask"],  # (B, H, W)
         "labels": labels,
     }
