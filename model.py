@@ -5,7 +5,7 @@ import torch.nn as nn
 class RTDetrGQAForObjectDetection(nn.Module):
 
     def __init__(self, config):
-        super().__init__(config)
+        super().__init__()
 
         self.device = config["device"]
         id2label = {0: "car"}
@@ -24,7 +24,10 @@ class RTDetrGQAForObjectDetection(nn.Module):
         # 3. 把 decoder 裡所有 self-attn 換成 GQA
         decoder = self.model.model.decoder  # 這個名稱可用 print(model) 確認
 
-        d_model = self.model.config.hidden_size  # 通常 256
+        if config["hidden_dim_GQA"] is not None:
+            d_model = config["hidden_dim_GQA"]
+        else:
+            d_model = self.model.config.hidden_size  # 通常 256
         n_heads = self.model.config.num_attention_heads  # 通常 8
 
         for layer in decoder.layers:
@@ -56,10 +59,10 @@ class GroupedQueryAttention(nn.Module):
         self.group_size = num_q_heads // num_kv_heads
         self.head_dim = embed_dim // num_q_heads
 
-        self.q = nn.Linear(embed_dim, embed_dim)
-        self.k = nn.Linear(embed_dim, embed_dim)
-        self.v = nn.Linear(embed_dim, embed_dim)
-        self.o = nn.Linear(embed_dim, embed_dim)
+        self.q = nn.Linear(embed_dim, num_q_heads * self.head_dim)
+        self.k = nn.Linear(embed_dim, num_kv_heads * self.head_dim)
+        self.v = nn.Linear(embed_dim, num_kv_heads * self.head_dim)
+        self.o = nn.Linear(num_q_heads * self.head_dim, embed_dim)
 
         self.dropout = nn.Dropout(dropout)
 
