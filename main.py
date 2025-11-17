@@ -7,6 +7,7 @@ from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
+from torch.utils.tensorboard import SummaryWriter
 
 from ds import GTACarDataset, collate_fn
 from model import RTDetrGQAForObjectDetection
@@ -129,12 +130,28 @@ def parse_args():
         type=int,
         default=2,
         help="Alternative warmup duration expressed in epochs.")
+    parser.add_argument("--log_dir",
+                        type=str,
+                        default="runs/",
+                        help="TensorBoard log directory (default runs/*).")
+    parser.add_argument("--hidden_dim_GQA",
+                        type=int,
+                        default=None,
+                        help="Hidden dimension for GQA modules.")
     return parser.parse_args()
 
 
 def train(detector, config):
     device = config["device"]
     detector = detector.to(device)
+    writer = SummaryWriter(log_dir=config.get("log_dir") or None)
+    config_snapshot = json.dumps({
+        k: str(v)
+        for k, v in config.items()
+    },
+                                 indent=2,
+                                 sort_keys=True)
+    writer.add_text("config", f"<pre>{config_snapshot}</pre>", global_step=0)
 
     train_dataset = GTACarDataset(config["root_dir"], "train",
                                   detector.processor)
@@ -203,6 +220,14 @@ def train(detector, config):
                 scheduler.step()
 
             total_loss += loss.item()
+            writer.add_scalar("train/total_loss", loss.item(), global_step)
+            loss_dict = getattr(outputs, "loss_dict", None)
+            if loss_dict:
+                for name, value in loss_dict.items():
+                    writer.add_scalar(f"train/{name}", value.item(),
+                                      global_step)
+            current_lr = optimizer.param_groups[0]["lr"]
+            writer.add_scalar("train/lr", current_lr, global_step)
             global_step += 1
 
         print(
@@ -213,6 +238,7 @@ def train(detector, config):
             metrics = evaluate(detector, val_loader, device)
             current_map = metrics["map"].item()
             print(f"Validation mAP@0.85: {current_map:.4f}")
+            writer.add_scalar("val/mAP_0.85", current_map, epoch + 1)
 
             if current_map > best_score:
                 best_score = current_map
@@ -225,6 +251,8 @@ def train(detector, config):
                     print("New best score (no checkpoint path configured).")
 
             detector.train()
+    writer.flush()
+    writer.close()
 
 
 if __name__ == "__main__":
