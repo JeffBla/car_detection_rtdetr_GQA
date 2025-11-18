@@ -23,11 +23,12 @@ class RTDetrGQAForObjectDetection(nn.Module):
 
         # 3. 把 decoder 裡所有 self-attn 換成 GQA
         decoder = self.model.model.decoder  # 這個名稱可用 print(model) 確認
+        hidden_size = self.model.config.hidden_size  # 通常 256
 
         if config["hidden_dim_GQA"] is not None:
             d_model = config["hidden_dim_GQA"]
         else:
-            d_model = self.model.config.hidden_size  # 通常 256
+            d_model = hidden_size
         n_heads = self.model.config.num_attention_heads  # 通常 8
 
         for layer in decoder.layers:
@@ -36,6 +37,8 @@ class RTDetrGQAForObjectDetection(nn.Module):
                 num_q_heads=n_heads,
                 num_kv_heads=config["num_kv_heads"],  # 推薦 4；你也可以試 2
                 dropout=self.model.config.dropout,
+                input_dim=hidden_size,
+                output_dim=hidden_size,
             )
 
     def forward(self, pixel_values, pixel_mask=None, labels=None):
@@ -49,15 +52,32 @@ class RTDetrGQAForObjectDetection(nn.Module):
 # 2.  GQA 模組（介面像 HF attention：forward(hidden_states, attention_mask, ...)
 class GroupedQueryAttention(nn.Module):
 
-    def __init__(self, embed_dim, num_q_heads=8, num_kv_heads=4, dropout=0.1):
+    def __init__(self,
+                 embed_dim,
+                 num_q_heads=8,
+                 num_kv_heads=4,
+                 dropout=0.1,
+                 input_dim=None,
+                 output_dim=None):
         super().__init__()
         assert embed_dim % num_q_heads == 0
         assert num_q_heads % num_kv_heads == 0
         self.embed_dim = embed_dim
+        self.input_dim = input_dim or embed_dim
+        self.output_dim = output_dim or embed_dim
         self.num_q_heads = num_q_heads
         self.num_kv_heads = num_kv_heads
         self.group_size = num_q_heads // num_kv_heads
         self.head_dim = embed_dim // num_q_heads
+
+        if self.input_dim != embed_dim:
+            self.pre_proj = nn.Linear(self.input_dim, embed_dim)
+        else:
+            self.pre_proj = nn.Identity()
+        if self.output_dim != embed_dim:
+            self.post_proj = nn.Linear(embed_dim, self.output_dim)
+        else:
+            self.post_proj = nn.Identity()
 
         self.q = nn.Linear(embed_dim, num_q_heads * self.head_dim)
         self.k = nn.Linear(embed_dim, num_kv_heads * self.head_dim)
@@ -76,7 +96,8 @@ class GroupedQueryAttention(nn.Module):
                 output_attentions=False,
                 **kwargs):
         import math, torch
-        B, N, C = hidden_states.shape
+        hidden_states = self.pre_proj(hidden_states)
+        B, N, _ = hidden_states.shape
 
         q = self._reshape(self.q(hidden_states), B, N, self.num_q_heads)
         k = self._reshape(self.k(hidden_states), B, N, self.num_kv_heads)
@@ -96,8 +117,10 @@ class GroupedQueryAttention(nn.Module):
         attn = self.dropout(attn)
 
         context = torch.matmul(attn, v)  # (B, Hq, N, Dh)
-        context = context.permute(0, 2, 1, 3).contiguous().view(B, N, C)
+        context = context.permute(0, 2, 1, 3).contiguous().view(
+            B, N, self.embed_dim)
         out = self.o(context)
+        out = self.post_proj(out)
 
         if output_attentions:
             return out, attn
