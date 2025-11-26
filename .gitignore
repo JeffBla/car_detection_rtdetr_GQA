@@ -1,6 +1,7 @@
 hw3_dataset*
 AGENTS.md
 runs/
+runs\ copy/
 
 __pycache__
 .vscode

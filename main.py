@@ -1,5 +1,6 @@
 import argparse
 import json
+from pathlib import Path
 import torch
 from tqdm import tqdm
 from functools import partial
@@ -11,6 +12,10 @@ from torch.utils.tensorboard import SummaryWriter
 
 from ds import GTACarDataset, collate_fn
 from model import RTDetrGQAForObjectDetection
+
+
+def num_parameters(model):
+    return sum(p.numel() for p in model.parameters())
 
 
 def _box_cxcywh_to_xyxy(boxes: torch.Tensor) -> torch.Tensor:
@@ -48,11 +53,12 @@ def _prepare_targets(batch_labels):
 
 
 @torch.no_grad()
-def evaluate(detector, data_loader, device):
+def evaluate(detector, data_loader, device, collect_predictions: bool = False):
     metric = MeanAveragePrecision(iou_type="bbox",
                                   iou_thresholds=[0.85],
                                   class_metrics=True)
     detector.eval()
+    detections = [] if collect_predictions else None
 
     for batch in tqdm(data_loader):
         pixel_values = batch["pixel_values"].to(device)
@@ -71,10 +77,32 @@ def evaluate(detector, data_loader, device):
             "scores": item["scores"].cpu(),
             "labels": item["labels"].cpu(),
         } for item in processed_outputs]
+        if collect_predictions:
+            image_ids = batch.get("image_ids")
+            if image_ids is None:
+                raise ValueError("image_ids missing from batch data")
+            for img_id, item in zip(image_ids, processed_outputs):
+                boxes = item["boxes"].cpu().tolist()
+                scores = item["scores"].cpu().tolist()
+                labels = item["labels"].cpu().tolist()
+                for box, score, label in zip(boxes, scores, labels):
+                    x_min, y_min, x_max, y_max = box
+                    bbox = [
+                        x_min,
+                        y_min,
+                        max(0.0, x_max - x_min),
+                        max(0.0, y_max - y_min),
+                    ]
+                    detections.append({
+                        "image_id": int(img_id),
+                        "category_id": int(label),
+                        "bbox": bbox,
+                        "score": float(score),
+                    })
         targets = _prepare_targets(batch["labels"])
         metric.update(preds, targets)
 
-    return metric.compute()
+    return metric.compute(), detections
 
 
 def parse_args():
@@ -107,7 +135,6 @@ def parse_args():
                         help="How often (in epochs) to run validation.")
     parser.add_argument("--checkpoint_path",
                         type=str,
-                        default="./run/ckpt_epoch_best{epoch}.pth",
                         help="Pattern for checkpoint path. Empty to disable.")
     parser.add_argument("--num_kv_heads",
                         type=int,
@@ -138,6 +165,13 @@ def parse_args():
                         type=int,
                         default=None,
                         help="Hidden dimension for GQA modules.")
+    parser.add_argument(
+        "--detections_output",
+        type=str,
+        default=None,
+        help=("When running --skip_train with evaluate_only, write model "
+              "predictions (COCO JSON) to this path."),
+    )
     return parser.parse_args()
 
 
@@ -235,7 +269,7 @@ def train(detector, config):
         )
 
         if (epoch + 1) % config["eval_interval"] == 0:
-            metrics = evaluate(detector, val_loader, device)
+            metrics, _ = evaluate(detector, val_loader, device)
             current_map = metrics["map"].item()
             print(f"Validation mAP@0.85: {current_map:.4f}")
             writer.add_scalar("val/mAP_0.85", current_map, epoch + 1)
@@ -255,6 +289,41 @@ def train(detector, config):
     writer.close()
 
 
+def evaluate_only(detector, config):
+    device = config["device"]
+    if config.get("checkpoint_path"):
+        checkpoint_path = config["checkpoint_path"]
+        detector.load_state_dict(
+            torch.load(checkpoint_path, map_location=device))
+        print(f"Loaded model checkpoint from {checkpoint_path}")
+
+    model_size = num_parameters(detector)
+    print(f"Model size: {model_size}")
+    detector = detector.to(device)
+
+    val_dataset = GTACarDataset(config["root_dir"], config.get("eval_split"),
+                                detector.processor)
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config["batch_size"],
+        shuffle=False,
+        collate_fn=partial(collate_fn, processor=detector.processor),
+    )
+
+    collect_predictions = bool(config.get("detections_output"))
+    metrics, detections = evaluate(detector,
+                                   val_loader,
+                                   device,
+                                   collect_predictions=collect_predictions)
+    current_map = metrics["map"].item()
+    print(f"Validation mAP@0.85: {current_map:.4f}")
+    if collect_predictions and detections is not None:
+        output_path = Path(config["detections_output"])
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(detections, indent=2))
+        print(f"Saved {len(detections)} detections to {output_path}")
+
+
 if __name__ == "__main__":
     args = parse_args()
     config = vars(args)
@@ -263,3 +332,5 @@ if __name__ == "__main__":
 
     if not config["skip_train"]:
         train(model, config)
+    else:
+        evaluate_only(model, config)

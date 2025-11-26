@@ -74,12 +74,16 @@ class GTACarDataset(Dataset):
         return {
             "pixel_values": pixel_values,
             "labels": labels,
+            "image_id": img_id,
+            "file_name": file_name,
         }
 
 
 def collate_fn(batch, processor):
     pixel_values = [item["pixel_values"] for item in batch]
     labels = [item["labels"] for item in batch]
+    image_ids = [item["image_id"] for item in batch]
+    file_names = [item["file_name"] for item in batch]
 
     # 這裡會做 padding + 建 pixel_mask
     encoding = processor.pad(
@@ -92,4 +96,6 @@ def collate_fn(batch, processor):
         "pixel_values": encoding["pixel_values"],  # (B, 3, H, W)
         "pixel_mask": encoding["pixel_mask"],  # (B, H, W)
         "labels": labels,
+        "image_ids": image_ids,
+        "file_names": file_names,
     }
