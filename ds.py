@@ -10,13 +10,30 @@ class GTACarDataset(Dataset):
     def __init__(self, root_dir, split, processor):
         """
         root_dir: ./hw3_dataset
-        split: 'train' or 'val'
-        annotations.json: ./hw3_dataset/{split}/annotations.json
+        split: 'train', 'val', or 'test'
+        annotations.json: ./hw3_dataset/{split}/annotations.json (train/val)
         images:          ./hw3_dataset/{split}/images/xxx.png
         """
         self.root_dir = root_dir
         self.split = split
         self.processor = processor
+
+        if split == "test":
+            images_dir = os.path.join(root_dir, split, "images")
+            file_names = sorted([
+                f for f in os.listdir(images_dir)
+                if f.lower().endswith((".png", ".jpg", ".jpeg"))
+            ])
+            self.images = []
+            for idx, file_name in enumerate(file_names):
+                stem = os.path.splitext(file_name)[0]
+                try:
+                    img_id = int(stem)
+                except ValueError:
+                    img_id = idx
+                self.images.append({"id": img_id, "file_name": file_name})
+            self.anns_per_image = defaultdict(list)
+            return
 
         ann_path = os.path.join(root_dir, split, "annotations.json")
         with open(ann_path, "r") as f:
@@ -42,6 +59,22 @@ class GTACarDataset(Dataset):
 
         img_path = os.path.join(self.root_dir, self.split, "images", file_name)
         image = Image.open(img_path).convert("RGB")
+
+        if self.split == "test":
+            encoded = self.processor(images=image, return_tensors="pt")
+            pixel_values = encoded["pixel_values"].squeeze(0)
+            h, w = image.height, image.width
+            labels = {
+                "boxes": torch.zeros((0, 4), dtype=torch.float32),
+                "class_labels": torch.zeros((0, ), dtype=torch.int64),
+                "orig_size": torch.tensor([h, w], dtype=torch.int64),
+            }
+            return {
+                "pixel_values": pixel_values,
+                "labels": labels,
+                "image_id": img_id,
+                "file_name": file_name,
+            }
 
         anns = self.anns_per_image[img_id]
 

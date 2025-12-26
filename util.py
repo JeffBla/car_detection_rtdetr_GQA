@@ -53,6 +53,46 @@ def _write_lines(path: Path, rows: Iterable[str]) -> None:
     path.write_text(text)
 
 
+def _synthesize_coco_from_detections(
+        split_dir: Path, detections: Sequence[dict]) -> dict:
+    """
+    Build a minimal COCO-style structure using detections only.
+
+    The synthesized dataset includes:
+        * ``images``: derived from ``split_dir / "images"`` matching stems
+          against detection ``image_id`` values (e.g. ``101 -> 101.jpg``).
+        * ``categories``: numeric IDs mapped to their own string name.
+        * ``annotations``: empty list.
+    """
+    images_dir = split_dir / "images"
+    if not images_dir.exists():
+        raise FileNotFoundError(f"Missing images directory: {images_dir}")
+
+    stem_to_name = {
+        path.stem: path.name
+        for path in images_dir.iterdir() if path.is_file()
+    }
+    image_entries = []
+    for image_id in sorted({det["image_id"] for det in detections}):
+        stem = str(image_id)
+        file_name = stem_to_name.get(stem)
+        if not file_name:
+            raise FileNotFoundError(
+                f"No image file matches id '{image_id}' in {images_dir}")
+        image_entries.append({"id": image_id, "file_name": file_name})
+
+    category_entries = [{
+        "id": cat_id,
+        "name": str(cat_id),
+    } for cat_id in sorted({det["category_id"] for det in detections})]
+
+    return {
+        "images": image_entries,
+        "annotations": [],
+        "categories": category_entries,
+    }
+
+
 def convert_split(split_name: str,
                   dataset_root: str,
                   output_root: str | None = None,
@@ -67,37 +107,27 @@ def convert_split(split_name: str,
         output_root: Optional root for converted files. Defaults to
             ``<dataset_root>/<split>/pascalvoc``.
         detections_json: Optional path to COCO-style detection results JSON.
+            When ``annotations.json`` is missing (e.g. ``test`` split), the
+            detections are used to synthesize the required image metadata using
+            ``split/images/<image_id>.jpg``.
         box_format: Either ``xyxy`` (default) or ``xywh``.
     """
     split_dir = Path(dataset_root) / split_name
     ann_path = split_dir / "annotations.json"
-    if not ann_path.exists():
-        raise FileNotFoundError(f"Missing annotations JSON: {ann_path}")
 
     output_base = (Path(output_root) if output_root else split_dir /
                    "pascalvoc")
     gt_dir = output_base / "groundtruths"
     det_dir = output_base / "detections"
 
-    coco = json.loads(ann_path.read_text())
-    categories: Dict[int, str] = {
-        item["id"]: item["name"]
-        for item in coco.get("categories", [])
-    }
-
-    annotations = defaultdict(list)
-    for ann in coco.get("annotations", []):
-        if ann.get("iscrowd", 0):
-            continue
-        annotations[ann["image_id"]].append(ann)
-
+    detections_data: List[dict] = []
     detections_by_image: Dict[int, List[dict]] = defaultdict(list)
     if detections_json:
         det_path = Path(detections_json)
         if not det_path.exists():
             raise FileNotFoundError(f"Missing detections JSON: {det_path}")
-        detections = json.loads(det_path.read_text())
-        for det in detections:
+        detections_data = json.loads(det_path.read_text())
+        for det in detections_data:
             image_id = det["image_id"]
             score = det.get("score", det.get("confidence"))
             if score is None:
@@ -111,6 +141,26 @@ def convert_split(split_name: str,
                 "bbox":
                 det["bbox"],
             })
+
+    if ann_path.exists():
+        coco = json.loads(ann_path.read_text())
+    else:
+        if not detections_data:
+            raise FileNotFoundError(
+                f"Missing annotations JSON: {ann_path}. Provide detections to "
+                "synthesize image metadata.")
+        coco = _synthesize_coco_from_detections(split_dir, detections_data)
+
+    categories: Dict[int, str] = {
+        item["id"]: item["name"]
+        for item in coco.get("categories", [])
+    }
+
+    annotations = defaultdict(list)
+    for ann in coco.get("annotations", []):
+        if ann.get("iscrowd", 0):
+            continue
+        annotations[ann["image_id"]].append(ann)
 
     for image in coco.get("images", []):
         image_id = image["id"]

@@ -172,6 +172,12 @@ def parse_args():
         help=("When running --skip_train with evaluate_only, write model "
               "predictions (COCO JSON) to this path."),
     )
+    parser.add_argument(
+        "--eval_split",
+        type=str,
+        default="val",
+        help="Dataset split to use for evaluation when skipping training.",
+    )
     return parser.parse_args()
 
 
